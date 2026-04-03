@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import rydopt as ro
 import numpy as np
 import optax
-from awesome_rydopt import imitate_rydopt, optimize, sequence_optimize, multi_start_optimize
+from awesome_rydopt import awesome_state, optimize, sequence_optimize, multi_start_optimize, imitate_rydopt
 from awesome_rydopt import filter_by_fidelity_function, sort_by_fidelity_function
 
 from src.fidelities.intensity import custom_robust_shift
@@ -47,7 +47,7 @@ if __name__ == '__main__':
         opt_result = optimize(gate, pulse_ansatz, initial_params, num_steps=1000, tol=1e-10,
                               min_initial_params=min_initial_params,  # Границы
                               max_initial_params=max_initial_params,
-                              method=optax.lion,  # Выбор оптимизатор
+                              method=optax.lion,  # Выбор оптимизатора
                               fidelity_type=custom_robust_shift,  # Выбор фиделити
                               apply_bounds=True  # Применение границ
                               )
@@ -67,16 +67,16 @@ if __name__ == '__main__':
 
     if True:
         opt_result = multi_start_optimize(gate, pulse_ansatz,
-                                          min_initial_params,
+                                          min_initial_params,  # Границы
                                           max_initial_params,
                                           fixed_params,
                                           learning_rate=0.001,
                                           num_steps=100,
                                           tol=1e-10,
-                                          method=optax.nadamw,
-                                          fidelity_type=process_fidelity,
-                                          num_processes=8,
-                                          apply_bounds=False,
+                                          method=optax.nadamw, # Выбор оптимизатора
+                                          fidelity_type=process_fidelity, # Выбор функции потерь
+                                          num_processes=8, # Число процессов
+                                          apply_bounds=False, # Применение границ
                                           return_list_results=True)  # Отдает не один OptimizationResult, а все списком
 
         # Сортировочка
