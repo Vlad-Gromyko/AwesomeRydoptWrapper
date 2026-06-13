@@ -2,14 +2,16 @@ import matplotlib.pyplot as plt
 import rydopt as ro
 import numpy as np
 import optax
-from awesome_rydopt import awesome_state, optimize, sequence_optimize, multi_start_optimize, imitate_rydopt
+from awesome_rydopt import (awesome_state, optimize, sequence_optimize, multi_start_optimize, imitate_rydopt,
+                            population_optimize)
 from awesome_rydopt import filter_by_fidelity_function, sort_by_fidelity_function
+from optimization.population.cma_optimizer import CMAOptimizer
 
 from src.fidelities.intensity import custom_robust_shift
 from rydopt.simulation.fidelity import process_fidelity
 
 if __name__ == '__main__':
-    imitate_rydopt(True)
+    imitate_rydopt(False)
 
     gate = ro.gates.TwoQubitGate(phi=None, theta=np.pi, Vnn=float("inf"), decay=0.0)
     pulse_ansatz = ro.pulses.PulseAnsatz(
@@ -44,46 +46,45 @@ if __name__ == '__main__':
                     [True])
 
     if True:
-        opt_result = optimize(gate, pulse_ansatz, initial_params, num_steps=1000, tol=1e-10,
+        opt_result = optimize(gate, pulse_ansatz, random_initial_params, num_steps=10, tol=1e-10,
                               min_initial_params=min_initial_params,  # Границы
                               max_initial_params=max_initial_params,
-                              method=optax.lion,  # Выбор оптимизатора
+                              method=optax.adam,  # Выбор оптимизатора
                               fidelity_type=custom_robust_shift,  # Выбор фиделити
-                              apply_bounds=True  # Применение границ
-                              )
+                              apply_bounds=True,  # Применение границ
+                              return_best=True)
 
-    if True:
-        opt_result = sequence_optimize(gate, pulse_ansatz, random_initial_params,
+    if False:
+        opt_result = sequence_optimize(gate, pulse_ansatz, opt_result.params,
                                        min_initial_params=min_initial_params,
                                        max_initial_params=max_initial_params,
                                        fixed_initial_params=fixed_params,
                                        learning_rate=[0.01, 0.0005, 0.0001],  # -> [0.01, 0.0005, 0.0001]
-                                       num_steps=[20, 1000],  # -> [20, 1000, 20]
+                                       num_steps=[20, 10],  # -> [20, 1000, 20]
                                        tol=1e-10,  # -> [1e-10, 1e-10, 1e-10]
                                        method=[optax.adam],  # -> [optax.adam, optax.adam, optax.adam]
-                                       fidelity_type=[process_fidelity, custom_robust_shift],
+                                       fidelity_type=[custom_robust_shift, custom_robust_shift],
                                        # -> [process_fidelity, custom_robust_shift, process_fidelity]
-                                       apply_bounds=False)
+                                       apply_bounds=False,  # Применение границ
+                                       return_best=True)
 
+    # После градиентной оптимизации используем её результат как начальное среднее для CMA-ES
     if True:
-        opt_result = multi_start_optimize(gate, pulse_ansatz,
-                                          min_initial_params,  # Границы
-                                          max_initial_params,
-                                          fixed_params,
-                                          learning_rate=0.001,
-                                          num_steps=100,
-                                          tol=1e-10,
-                                          method=optax.nadamw, # Выбор оптимизатора
-                                          fidelity_type=process_fidelity, # Выбор функции потерь
-                                          num_processes=8, # Число процессов
-                                          apply_bounds=False, # Применение границ
-                                          return_list_results=True)  # Отдает не один OptimizationResult, а все списком
-
-        # Сортировочка
-        sorted_ = sort_by_fidelity_function(gate, pulse_ansatz, opt_result, custom_robust_shift, tol=1e-7)
-
-        # Отбор лучшего
-        opt_result = filter_by_fidelity_function(gate, pulse_ansatz, opt_result, custom_robust_shift, tol=1e-10)
+        # Затем CMA-ES с начальным средним из результата градиентной оптимизации
+        opt_result = population_optimize(
+            gate, pulse_ansatz, opt_result.params,
+            min_initial_params, max_initial_params,
+            fixed_params,
+            num_generations=5,
+            population_size=15,
+            optimizer_class=CMAOptimizer,
+            optimizer_kwargs={'sigma0': 0.2, 'seed': 42},  # Меньший sigma0 т.к. уже близко
+            tol=1e-8,
+            fidelity_type=custom_robust_shift,
+            verbose=True,
+            apply_bounds=True,
+            return_history=True,
+            return_best=True)
 
     optimized_params = opt_result.params
     ro.characterization.plot_pulse(pulse_ansatz, optimized_params)

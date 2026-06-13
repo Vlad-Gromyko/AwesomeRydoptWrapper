@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from functools import partial
 from queue import SimpleQueue
 from types import TracebackType
-from typing import Any, Generic, Literal, Protocol, TypeVar, overload
+from typing import Any, Generic, Literal, Protocol, TypeVar, overload, Optional
 
 import jax
 import jax.numpy as jnp
@@ -58,6 +58,10 @@ class OptimizationResult(Generic[ParamsType, ValueType, HistoryType]):
     runtime_in_sec: float
 
 
+def _to_jax_params(params: PulseParams) -> PulseParams:
+    return tuple(jnp.asarray(p) if isinstance(p, (np.ndarray, list, tuple)) else p for p in params)
+
+
 def custom_optimize_gradient(
         gate: GateSystem,
         pulse: PulseAnsatz,
@@ -73,7 +77,8 @@ def custom_optimize_gradient(
         verbose: bool = False,
         method: Callable = None,
         fidelity_type: Callable = None,
-        apply_bounds: bool = False
+        apply_bounds: bool = False,
+        return_best: bool = True,
 ) -> OptimizationResult[PulseParams, float, np.ndarray | None]:
 
     flat_min = None
@@ -125,7 +130,7 @@ def custom_optimize_gradient(
                 method,
                 fidelity_type,
                 flat_min,
-                flat_max
+                flat_max,
             )
         )
     runtime = time.perf_counter() - t0
@@ -143,6 +148,24 @@ def custom_optimize_gradient(
     num_converged = 1 if final_infidelity <= tol else 0
 
     # --- Logging ---
+    if return_best:
+        params_to_check = _to_jax_params(initial_params)
+        check_initial_infidelity = 1 - float(fidelity_type(gate, pulse, params_to_check, tol))
+
+
+        if check_initial_infidelity < float(final_infidelity):
+            return OptimizationResult(
+                params=initial_params,
+                infidelity=float(check_initial_infidelity),
+                duration=initial_params[0],
+                infidelity_history=infidelity_history,
+                duration_history=duration_history,
+                grad_norm_history=grad_norm_history,
+                num_steps=num_steps,
+                tol=tol,
+                runtime_in_sec=runtime,
+            )
+
 
     _print_summary(method.__name__, runtime, tol, num_converged)
     _print_gate("Optimized gate:", final_params, float(final_infidelity), tol)
@@ -730,6 +753,8 @@ def _adam_scan(
                 ),
             )
 
+
+
         new_carry = (params, new_params, inf, opt_state, converged, grad_norm, new_best_params, new_best_inf)
         if return_history:
             return new_carry, (inf, params[..., 0], grad_norm)
@@ -768,7 +793,8 @@ def _adam_optimize(
         method: Callable,
         fidelity_type: Callable,
         flat_min = None,
-        flat_max= None
+        flat_max= None,
+
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     device_ctx = nullcontext() if device_idx is None else jax.default_device(jax.devices()[device_idx])
 
@@ -807,6 +833,7 @@ def _adam_optimize(
             progress_hook=progress_hook,
             return_history=return_history,
             is_batched=(trainable.ndim > 1),
+
         )
 
         if return_history:
@@ -825,3 +852,230 @@ def _adam_optimize(
             duration_history,
             grad_norm_history,
         )
+
+
+def population_optimize(
+        gate: GateSystem,
+        pulse: PulseAnsatz,
+        initial_params: PulseParams,  # НОВЫЙ ПАРАМЕТР - хорошее начальное решение
+        min_initial_params: PulseParams,
+        max_initial_params: PulseParams,
+        fixed_initial_params: FixedPulseParams | None = None,
+        *,
+        num_generations: int = 200,
+        population_size: int | None = None,
+        optimizer_class: type = None,
+        optimizer_kwargs: dict | None = None,
+
+        tol: float = 1e-7,
+        return_history: bool = False,
+        verbose: bool = False,
+        fidelity_type: Callable = None,
+        apply_bounds: bool = True,
+        return_best: bool = True,
+
+) -> OptimizationResult[PulseParams, float, np.ndarray | None]:
+
+
+    from src.optimization.population.cma_optimizer import CMAOptimizer
+
+    if fidelity_type is None:
+        fidelity_type = process_fidelity
+    if optimizer_kwargs is None:
+        optimizer_kwargs = {}
+
+    if optimizer_class is None:
+        optimizer_class = CMAOptimizer
+
+    # Подготовка параметров
+    split_indices = _spec(min_initial_params)
+    flat_min = _ravel(min_initial_params)
+    flat_max = _ravel(max_initial_params)
+
+    # Маска обучаемых параметров
+    if fixed_initial_params is None:
+        trainable_mask = np.ones_like(flat_min, dtype=bool)
+    else:
+        flat_fixed = _ravel(fixed_initial_params)
+        trainable_mask = ~flat_fixed.astype(bool)
+    trainable_indices = np.nonzero(trainable_mask)[0]
+
+    dimension = len(trainable_indices)
+
+    # Границы
+    bounds = None
+    flat_min_jax = jnp.asarray(flat_min)
+    flat_max_jax = jnp.asarray(flat_max)
+
+    if apply_bounds:
+        bounds = (flat_min[trainable_indices], flat_max[trainable_indices])
+
+    # Подготовка начального среднего (если передано)
+    initial_mean_flat = None
+    if initial_params is not None:
+        # Конвертируем PulseParams в плоский массив
+        initial_mean_flat_np = _ravel(initial_params)
+        initial_mean_flat = initial_mean_flat_np[trainable_indices]
+        if verbose:
+            print(f"Using provided initial mean for optimizer")
+            # Вычисляем infidelity начального решения
+            try:
+                # Создаем JAX массив для вычисления
+                initial_mean_jax = jnp.asarray(initial_mean_flat)
+                # Временно создаем функцию для вычисления
+                full = flat_min_jax
+                trainable_indices_jax = jnp.asarray(trainable_indices)
+                if apply_bounds:
+                    min_trainable = flat_min_jax[trainable_indices_jax]
+                    max_trainable = flat_max_jax[trainable_indices_jax]
+                else:
+                    min_trainable = max_trainable = None
+
+                def temp_inf(params):
+                    if min_trainable is not None:
+                        params = jnp.clip(params, min_trainable, max_trainable)
+                    p = full.at[trainable_indices_jax].set(params)
+                    pt = _unravel_jax(p, split_indices)
+                    return jnp.abs(1 - fidelity_type(gate, pulse, pt, tol))
+
+                init_inf = float(temp_inf(initial_mean_jax))
+                print(f"  Initial mean infidelity: {init_inf:.6e}")
+            except:
+                pass
+
+        # Добавляем в optimizer_kwargs
+        optimizer_kwargs['mean'] = initial_mean_flat
+
+    # Создаем оптимизатор
+    if population_size is not None:
+        optimizer_kwargs['population_size'] = population_size
+    if bounds is not None:
+        optimizer_kwargs['bounds'] = bounds
+
+    optimizer = optimizer_class(dimension=dimension, **optimizer_kwargs)
+
+    # Создаем JAX функцию infidelity
+    full = flat_min_jax
+    trainable_indices_jax = jnp.asarray(trainable_indices)
+
+    if apply_bounds:
+        min_trainable = flat_min_jax[trainable_indices_jax]
+        max_trainable = flat_max_jax[trainable_indices_jax]
+    else:
+        min_trainable = max_trainable = None
+
+    def infidelity_func(params_trainable: jnp.ndarray) -> jnp.ndarray:
+        if min_trainable is not None:
+            params_trainable = jnp.clip(params_trainable, min_trainable, max_trainable)
+        params = full.at[trainable_indices_jax].set(params_trainable)
+        params_tuple = _unravel_jax(params, split_indices)
+        return jnp.abs(1 - fidelity_type(gate, pulse, params_tuple, tol))
+
+    infidelity_vmap = jax.vmap(infidelity_func)
+
+    if verbose:
+        print(f"\n=== Population Optimization ===\n")
+        print(f"Optimizer: {optimizer.__class__.__name__}")
+        print(f"Dimension: {dimension}")
+        print(f"Population size: {optimizer.population_size}")
+        print(f"Generations: {num_generations}")
+        if initial_mean_flat is not None:
+            print(f"Initial mean provided: Yes (first few values: {initial_mean_flat[:3]}...)")
+        print()
+
+    # Прогресс-бар
+    from tqdm.auto import tqdm
+
+    t0 = time.perf_counter()
+    best_inf_history = [] if return_history else None
+    best_inf = float('inf')
+    best_params = None
+
+    pbar = tqdm(total=num_generations, desc="Optimizing", disable=not verbose, dynamic_ncols=True)
+
+    for generation in range(num_generations):
+        population_np = np.array([optimizer.ask() for _ in range(optimizer.population_size)])
+        population_jax = jnp.asarray(population_np)
+        infidelities_jax = infidelity_vmap(population_jax)
+        infidelities_np = np.array(infidelities_jax)
+
+        solutions = list(zip(population_np, infidelities_np))
+        optimizer.tell(solutions)
+
+        current_best_params, current_best_inf = optimizer.result()
+
+        if current_best_inf < best_inf:
+            best_inf = current_best_inf
+            best_params = current_best_params.copy()
+
+        if return_history:
+            best_inf_history.append(best_inf)
+
+        pbar.set_postfix({'infidelity': f'{best_inf:.2e}'})
+        pbar.update(1)
+
+        if best_inf <= tol:
+            pbar.set_postfix({'infidelity': f'{best_inf:.2e}', 'converged': '✓'})
+            if verbose:
+                tqdm.write(f"\n✓ Target infidelity {tol:.1e} reached at generation {generation}")
+            break
+
+    pbar.close()
+    runtime = time.perf_counter() - t0
+
+    # Финальный результат
+    if best_params is None:
+        best_params, best_inf = optimizer.result()
+
+    final_full_jax = full.at[trainable_indices_jax].set(jnp.asarray(best_params))
+    final_params = _unravel_jax(final_full_jax, split_indices)
+
+    final_params_converted = []
+    for p in final_params:
+        if hasattr(p, 'shape') and p.shape == ():
+            final_params_converted.append(float(p))
+        elif hasattr(p, 'tolist'):
+            final_params_converted.append(p.tolist())
+        else:
+            final_params_converted.append(p)
+    final_params = tuple(final_params_converted)
+
+    if verbose:
+        print(f"\n=== Optimization finished using {optimizer.__class__.__name__} ===\n")
+        print(f"Runtime: {runtime:.3f} seconds")
+        if best_inf <= tol:
+            print(f"✓ Gate infidelity below tol={tol:.1e}")
+        else:
+            print(f"⚠️  Final infidelity = {best_inf:.6e} (tol={tol:.1e} not reached)")
+        print(f"Final duration: {final_params[0]:.4f}")
+
+    return_history_actual = return_history
+
+    if return_best:
+        params_to_check = _to_jax_params(initial_params)
+        check_initial_infidelity = 1 - float(fidelity_type(gate, pulse, params_to_check, tol))
+
+        if check_initial_infidelity < float(best_inf):
+            return OptimizationResult(
+                params=initial_params,
+                infidelity=float(check_initial_infidelity),
+                duration=initial_params[0],
+                infidelity_history=None,
+                duration_history=None,
+                grad_norm_history=None,
+                num_steps=0,
+                tol=tol,
+                runtime_in_sec=runtime,
+            )
+
+    return OptimizationResult(
+        params=final_params,
+        infidelity=float(best_inf),
+        duration=float(final_params[0]),
+        infidelity_history=np.array(best_inf_history) if return_history_actual else None,
+        duration_history=None,
+        grad_norm_history=None,
+        num_steps=len(best_inf_history) if best_inf_history else generation + 1,
+        tol=tol,
+        runtime_in_sec=runtime,
+    )
