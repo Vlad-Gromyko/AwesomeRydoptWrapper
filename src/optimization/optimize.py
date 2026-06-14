@@ -21,9 +21,17 @@ from rydopt.pulses.pulse_ansatz import PulseAnsatz
 from rydopt.simulation.fidelity import process_fidelity
 from rydopt.types import FixedPulseParams, PulseParams
 
+
+
+
 from typing import Union, List
 
 tqdm.monitor_interval = 0
+
+# Portal colors using ANSI codes
+PORTAL_BLUE = "\033[94m"      # ярко-синий
+PORTAL_ORANGE = "\033[38;5;208m"    # ярко-жёлтый (ближе к оранжевому)
+PORTAL_RESET = "\033[0m"
 
 ParamsType = TypeVar("ParamsType", covariant=True)
 ValueType = TypeVar("ValueType", covariant=True)
@@ -105,7 +113,8 @@ def custom_optimize_gradient(
 
     # --- Optimize parameters ---
 
-    print("Started optimization using 1 process\n")
+    #print("Started optimization using 1 process\n")
+    print(f"{PORTAL_BLUE}◧ Gradient Optimization ◧{PORTAL_RESET}")
 
     t0 = time.perf_counter()
     with _ProgressBar(
@@ -165,9 +174,6 @@ def custom_optimize_gradient(
                 tol=tol,
                 runtime_in_sec=runtime,
             )
-
-
-    _print_summary(method.__name__, runtime, tol, num_converged)
     _print_gate("Optimized gate:", final_params, float(final_infidelity), tol)
 
     return OptimizationResult(
@@ -544,7 +550,7 @@ class _ProgressBar:
                 if bar is None:
                     bar = tqdm(
                         total=self._num_steps,
-                        desc=f"proc{proc_idx:02d}",
+                        desc=f"{PORTAL_BLUE}proc{proc_idx:02d}{PORTAL_RESET}",
                         position=proc_idx,
                         file=sys.stdout,
                         dynamic_ncols=True,
@@ -552,12 +558,9 @@ class _ProgressBar:
                     bars[proc_idx] = bar
 
                 bar.n = step + 1
-                bar.set_postfix(
-                    {
-                        "infidelity": f"{min_inf:.2e}",
-                        "converged": f"{converged}/{self._min_converged_initializations}",
-                    },
-                    refresh=False,
+                bar.set_postfix_str(
+                    f"{PORTAL_ORANGE}infidelity={min_inf:.2e}, converged={converged}/{self._min_converged_initializations}{PORTAL_RESET}",
+                    refresh=False
                 )
                 bar.refresh()
 
@@ -876,7 +879,6 @@ def population_optimize(
 
 ) -> OptimizationResult[PulseParams, float, np.ndarray | None]:
 
-
     from src.optimization.population.cma_optimizer import CMAOptimizer
 
     if fidelity_type is None:
@@ -943,16 +945,16 @@ def population_optimize(
             except:
                 pass
 
-        # Добавляем в optimizer_kwargs
-        optimizer_kwargs['mean'] = initial_mean_flat
-
-    # Создаем оптимизатор
+    # Создаем словарь параметров для конструктора оптимизатора
+    init_kwargs = optimizer_kwargs.copy()
     if population_size is not None:
-        optimizer_kwargs['population_size'] = population_size
+        init_kwargs['population_size'] = population_size
     if bounds is not None:
-        optimizer_kwargs['bounds'] = bounds
+        init_kwargs['bounds'] = bounds
+    if initial_mean_flat is not None:
+        init_kwargs['mean'] = initial_mean_flat
 
-    optimizer = optimizer_class(dimension=dimension, **optimizer_kwargs)
+    optimizer = optimizer_class(dimension=dimension, **init_kwargs)
 
     # Создаем JAX функцию infidelity
     full = flat_min_jax
@@ -991,7 +993,12 @@ def population_optimize(
     best_inf = float('inf')
     best_params = None
 
-    pbar = tqdm(total=num_generations, desc="Optimizing", disable=not verbose, dynamic_ncols=True)
+    pbar = tqdm(
+        total=num_generations,
+        desc=f"{PORTAL_BLUE}Global Optimization{PORTAL_RESET}",
+        disable=not verbose,
+        dynamic_ncols=True,
+    )
 
     for generation in range(num_generations):
         population_np = np.array([optimizer.ask() for _ in range(optimizer.population_size)])
@@ -1011,13 +1018,11 @@ def population_optimize(
         if return_history:
             best_inf_history.append(best_inf)
 
-        pbar.set_postfix({'infidelity': f'{best_inf:.2e}'})
+        pbar.set_postfix_str(f"{PORTAL_ORANGE}infidelity={best_inf:.2e}{PORTAL_RESET}")
         pbar.update(1)
 
         if best_inf <= tol:
-            pbar.set_postfix({'infidelity': f'{best_inf:.2e}', 'converged': '✓'})
-            if verbose:
-                tqdm.write(f"\n✓ Target infidelity {tol:.1e} reached at generation {generation}")
+            tqdm.write(f"{PORTAL_ORANGE}✓ Target infidelity {tol:.1e} reached at generation {generation}{PORTAL_RESET}")
             break
 
     pbar.close()

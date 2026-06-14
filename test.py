@@ -6,6 +6,7 @@ from awesome_rydopt import (awesome_state, optimize, sequence_optimize, multi_st
                             population_optimize)
 from awesome_rydopt import filter_by_fidelity_function, sort_by_fidelity_function
 from optimization.population.cma_optimizer import CMAOptimizer
+from optimization.population.de import DEOptimizer
 
 from src.fidelities.intensity import custom_robust_shift
 from rydopt.simulation.fidelity import process_fidelity
@@ -46,37 +47,62 @@ if __name__ == '__main__':
                     [True])
 
     if True:
-        opt_result = optimize(gate, pulse_ansatz, random_initial_params, num_steps=10, tol=1e-10,
+        opt_result = optimize(gate, pulse_ansatz, random_initial_params, num_steps=100, tol=1e-10,
                               min_initial_params=min_initial_params,  # Границы
                               max_initial_params=max_initial_params,
-                              method=optax.adam,  # Выбор оптимизатора
+                              method=optax.nadam,  # Выбор оптимизатора
                               fidelity_type=custom_robust_shift,  # Выбор фиделити
                               apply_bounds=True,  # Применение границ
                               return_best=True)
 
-    if False:
-        opt_result = sequence_optimize(gate, pulse_ansatz, opt_result.params,
-                                       min_initial_params=min_initial_params,
-                                       max_initial_params=max_initial_params,
-                                       fixed_initial_params=fixed_params,
-                                       learning_rate=[0.01, 0.0005, 0.0001],  # -> [0.01, 0.0005, 0.0001]
-                                       num_steps=[20, 10],  # -> [20, 1000, 20]
-                                       tol=1e-10,  # -> [1e-10, 1e-10, 1e-10]
-                                       method=[optax.adam],  # -> [optax.adam, optax.adam, optax.adam]
-                                       fidelity_type=[custom_robust_shift, custom_robust_shift],
-                                       # -> [process_fidelity, custom_robust_shift, process_fidelity]
-                                       apply_bounds=False,  # Применение границ
-                                       return_best=True)
-
     # После градиентной оптимизации используем её результат как начальное среднее для CMA-ES
-    if True:
+
+    if False:
         # Затем CMA-ES с начальным средним из результата градиентной оптимизации
         opt_result = population_optimize(
             gate, pulse_ansatz, opt_result.params,
             min_initial_params, max_initial_params,
             fixed_params,
-            num_generations=5,
-            population_size=15,
+            num_generations=100,
+            population_size=150,
+            optimizer_class=DEOptimizer,
+            optimizer_kwargs={'spread': 0.03,
+                              'mutation_factor': 0.4,
+                              'crossover_prob': 0.8,
+                              'bounds': bounds},  # Меньший sigma0 т.к. уже близко
+            tol=1e-8,
+            fidelity_type=custom_robust_shift,
+            verbose=True,
+            apply_bounds=True,
+            return_history=True,
+            return_best=True)
+
+    if True:
+        for item in [0.5,0.2, 0.01]:
+            # Затем CMA-ES с начальным средним из результата градиентной оптимизации
+            opt_result = population_optimize(
+                gate, pulse_ansatz, opt_result.params,
+                min_initial_params, max_initial_params,
+                fixed_params,
+                num_generations=300,
+                population_size=50,
+                optimizer_class=CMAOptimizer,
+                optimizer_kwargs={'sigma0': item, 'seed': 42},  # Меньший sigma0 т.к. уже близко
+                tol=1e-8,
+                fidelity_type=custom_robust_shift,
+                verbose=True,
+                apply_bounds=True,
+                return_history=True,
+                return_best=True)
+
+    if False:
+        # Затем CMA-ES с начальным средним из результата градиентной оптимизации
+        opt_result = population_optimize(
+            gate, pulse_ansatz, opt_result.params,
+            min_initial_params, max_initial_params,
+            fixed_params,
+            num_generations=100,
+            population_size=150,
             optimizer_class=CMAOptimizer,
             optimizer_kwargs={'sigma0': 0.2, 'seed': 42},  # Меньший sigma0 т.к. уже близко
             tol=1e-8,
@@ -85,6 +111,39 @@ if __name__ == '__main__':
             apply_bounds=True,
             return_history=True,
             return_best=True)
+
+    if False:
+        # Затем CMA-ES с начальным средним из результата градиентной оптимизации
+        opt_result = population_optimize(
+            gate, pulse_ansatz, opt_result.params,
+            min_initial_params, max_initial_params,
+            fixed_params,
+            num_generations=100,
+            population_size=150,
+            optimizer_class=CMAOptimizer,
+            optimizer_kwargs={'sigma0': 0.1, 'seed': 42},  # Меньший sigma0 т.к. уже близко
+            tol=1e-8,
+            fidelity_type=custom_robust_shift,
+            verbose=True,
+            apply_bounds=True,
+            return_history=True,
+            return_best=True)
+
+    if True:
+        opt_result = sequence_optimize(gate, pulse_ansatz, opt_result.params,
+                                       min_initial_params=min_initial_params,
+                                       max_initial_params=max_initial_params,
+                                       fixed_initial_params=fixed_params,
+                                       learning_rate=[0.01, 0.0005, 0.0001],  # -> [0.01, 0.0005, 0.0001]
+                                       num_steps=[1000],  # -> [20, 1000, 20]
+                                       tol=1e-10,  # -> [1e-10, 1e-10, 1e-10]
+                                       method=[optax.nadam, optax.adamw],  # -> [optax.adam, optax.adam, optax.adam]
+                                       fidelity_type=[custom_robust_shift, custom_robust_shift],
+                                       # -> [process_fidelity, custom_robust_shift, process_fidelity]
+                                       apply_bounds=True,  # Применение границ
+                                       return_best=True)
+
+    awesome_state.plot_history(save_path='optimization_flow.png')
 
     optimized_params = opt_result.params
     ro.characterization.plot_pulse(pulse_ansatz, optimized_params)
